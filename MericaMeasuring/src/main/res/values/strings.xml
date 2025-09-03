@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">MericaMeasuring</string>
+    <string name="level_indicator_description">Circular indicator for displaying angle and levelness</string>
+</resources>
