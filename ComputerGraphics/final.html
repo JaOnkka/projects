@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <style>
+            body { 
+            }
+            canvas {
+                width: 800;
+                height: 600;
+            }
+            #render-button {
+                width: 180px;
+                height: 50px;
+                font-size: 24pt;
+            }
+            #the-canvas { border: 1px solid darkblue; }
+            #user-matrix input { width: 64px; font-size: 24px; }
+        </style>
+    </head>
+
+    <body>
+        <canvas id = "the-canvas" width = "800" height = "600"></canvas>
+        <script src = "lib.js"></script>
+        <script src = "vector.js"></script>
+        <script src = "matrix.js"></script>
+        <script src = "normal_mesh.js"></script>
+        <script src = "controls.js"></script>
+        <script src = "cam.js"></script>
+        <script src = "lit_material.js"></script>
+        <script src = "node.js"></script>
+        <script src = "rendermesh.js"></script>
+        <script src = "renderlight.js"></script>
+
+
+        <!-- <script src = "programs.js"></script> -->
+        <script src = "light.js"></script>
+        <script>
+            let canvas = document.getElementById( 'the-canvas' );
+            /** @type {WebGLRenderingContext} */
+            let gl = canvas.getContext( 'webgl2' );
+
+            const GOURAUD_VERTEX_SHADER = 
+            `   #version 300 es
+                precision mediump float;
+
+                uniform mat4 projection;
+                uniform mat4 modelview;
+                uniform mat4 model;
+                uniform mat4 view;
+                uniform vec3 viewer_loc;
+
+                uniform vec3 sun_dir;
+                uniform vec3 sun_color;
+                
+                uniform vec3 light1_loc;
+                uniform vec3 light1_color;
+
+                uniform vec3 light2_loc;
+                uniform vec3 light2_color;
+
+                const float light_attenuation_k = 0.01;
+                const float light_attenuation_l = 0.1;
+                const float light_attenuation_q = 0.00; /* no quadratic term for now */
+
+                uniform float mat_ambient;
+                uniform float mat_diffuse;
+                uniform float mat_specular;
+                uniform float mat_shininess;
+
+                in vec3 coordinates;
+                in vec4 color;
+                in vec2 uv;
+                in vec3 surf_normal;
+
+                out vec4 v_color;
+                out vec2 v_uv;
+
+                vec3 diff_color( 
+                    vec3 normal, 
+                    vec3 light_dir,
+                    vec3 light_color, 
+                    float mat_diffuse 
+                ) {
+                    return mat_diffuse * light_color * max( dot( normal, light_dir ), 0.0 );
+                }
+
+                vec3 spec_color( 
+                    vec3 normal, 
+                    vec3 light_dir,
+                    vec3 eye_dir, 
+                    vec3 light_color, 
+                    float mat_specular,
+                    float mat_shiniess
+                ) {
+                    float cos_light_surf_normal = dot( normal, light_dir );
+
+                    if( cos_light_surf_normal <= 0.0 ) {
+                        return vec3( 0.0, 0.0, 0.0 );
+                    }
+
+                    vec3 light_reflection = 
+                        2.0 * cos_light_surf_normal * normal - light_dir;
+
+                    return 
+                        pow( 
+                            max( dot( light_reflection, normalize( eye_dir ) ), 0.0  ),
+                            mat_shininess 
+                        ) * light_color * mat_specular;
+                }
+
+                float attenuation( vec3 vector_to_light ) {
+                    float light1_dist = length( vector_to_light );
+                    float light1_atten = 1.0 / ( 
+                        light_attenuation_k + 
+                        light_attenuation_l * light1_dist +
+                        light_attenuation_q * light1_dist * light1_dist
+                    );
+
+                    return light1_atten;
+                }
+
+                void main( void ) {
+                    vec3 normal_tx = normalize( mat3( model ) * surf_normal );
+                    vec3 coords_tx = ( model * vec4( coordinates, 1.0 ) ).xyz;
+
+                    gl_Position = projection * modelview * vec4( coordinates, 1.0 );
+                    vec3 eye_dir = normalize( viewer_loc - coords_tx );
+
+                    vec4 ambient_color = vec4( mat_ambient, mat_ambient, mat_ambient, 1.0 );
+
+                    // vec3 sun_dir_tx = 
+                    float cos_sun_dir_surf_normal = dot( sun_dir, normal_tx );
+                    vec3 sun_diffuse_color = diff_color( normal_tx, sun_dir, sun_color, mat_diffuse );
+                    
+                    vec3 sun_spec_color =
+                        spec_color( normal_tx, sun_dir, eye_dir, sun_color, mat_specular, mat_shininess );
+
+                    vec4 color_from_sun = vec4( sun_diffuse_color + sun_spec_color, 1.0 );
+
+                    vec3 vector_to_light1 = light1_loc - coords_tx;
+                    vec3 vector_to_light2 = light2_loc - coords_tx;
+                    vec3 light1_dir = normalize( vector_to_light1 );
+                    vec3 light2_dir = normalize( vector_to_light2);
+                    float light1_atten = attenuation( vector_to_light1 );
+                    float light2_atten = attenuation( vector_to_light2 );
+
+                    vec3 light1_diffuse_color = diff_color( 
+                        normal_tx, light1_dir, light1_color, mat_diffuse);
+                    vec3 light1_spec_color = spec_color( 
+                        normal_tx, light1_dir, eye_dir, light1_color, mat_specular, mat_shininess );
+                    vec4 color_from_light1 = vec4(
+                            ( light1_diffuse_color + light1_spec_color ) * light1_atten, 1.0 );
+
+
+                    vec3 light2_diffuse_color = diff_color( 
+                        normal_tx, light2_dir, light2_color, mat_diffuse);
+                    vec3 light2_spec_color = spec_color( 
+                        normal_tx, light2_dir, eye_dir, light2_color, mat_specular, mat_shininess );
+                    vec4 color_from_light2 = vec4(
+                            ( light2_diffuse_color + light2_spec_color ) * light2_atten, 1.0 );
+
+                    /* multiply color by 0 to remove it. try changing the 0 to a small number like .2
+                    and the 1 to the complement of that number (1 - .2 = .8) to see how color blending works.*/
+                    v_color = 
+                        ( 0.0 * color ) + 
+                        ( 1.0 * (
+                            ambient_color +
+                            color_from_sun +
+                            color_from_light1 +
+                            color_from_light2
+                        ) );
+                    v_uv = uv;
+                }
+            `;
+
+            const GOURAUD_FRAGMENT_SHADER = 
+            `   #version 300 es
+                precision mediump float;
+
+                in vec4 v_color;
+                in vec2 v_uv;
+
+                out vec4 f_color;
+
+                uniform sampler2D tex_0;
+
+                void main( void ) {
+                    f_color = v_color * texture( tex_0, v_uv ); 
+
+                    /* we can test depth values with this.
+                    f_color = vec4(vec3(gl_FragCoord.z), 1.0); */
+                }
+            `;
+
+            let lit_program = 
+                create_compile_and_link_program( 
+                    gl, 
+                    /*PHONG_VERTEX_SHADER,*/ GOURAUD_VERTEX_SHADER,
+                    /*PHONG_FRAGMENT_SHADER,*/ GOURAUD_FRAGMENT_SHADER
+                );
+
+            gl.useProgram( lit_program );
+
+            set_render_params( gl );
+
+            let last_update = performance.now();
+
+            const DESIRED_TICK_RATE = 60;
+            const DESIRED_MSPT = 1000.0 / DESIRED_TICK_RATE;
+
+            const ROTATION_SPEED = 0.2; // eighth turn per second
+            const ROTATION_SPEED_PER_FRAME = ROTATION_SPEED / DESIRED_TICK_RATE;
+
+            const FLY_SPEED = 2.5;    // units per second
+            const FLY_SPEED_PER_FRAME = FLY_SPEED / DESIRED_TICK_RATE;
+
+            let keys = Keys.start_listening();
+            let cam = new Camera();
+            cam.translate( 0, 0, -4.5 );
+
+            //'metal.png','grass_lawn_seamless.png','metal_scale.png' all from Canvas
+            let metal = 
+                new LitMaterial( gl, 'tex/metal.png', gl.LINEAR, 0.25, 1, 2, 5 );
+            let grass = 
+                new LitMaterial( gl, 
+                'tex/grass_lawn_seamless.png', gl.LINEAR, 0.4, 0.8, 0.05, 1.0 );
+            let scale = 
+                new LitMaterial( gl, 'tex/metal_scale.png', gl.LINEAR, 0.25, 1, 2, 4 );
+
+            //'minecraftcow.png' found from https://www.pinterest.com/pin/photoshoot--221661612902770715/
+            //minecraft mob template format was found here https://www.minecraftforum.net/forums/mapping-and-modding-java-edition/resource-packs/resource-pack-discussion/1256183-mob-skin-templates-wither-bat-and-witch-added
+            //cross referencing the texture and template helped for mapping UV coords
+            let cowtex = 
+                new LitMaterial( gl, 
+                'tex/minecraftcow.png', gl.LINEAR, 0.25, 0.8, 0.05, 1.0 );
+            //'water_tex.png' found from https://www.textures4photoshop.com/tex/water-and-liquid/water-pool-texture-seamless-and-free.aspx
+            let water_tex = 
+                new LitMaterial( gl, 
+                'tex/water_tex.png', gl.LINEAR, 0.2, 0.8, 0.05, 1.0 );
+
+            let sun_dir = ( new Vec4( 0.0, 50.0, 0.0, 0.0 ) ).norm();
+            let sun = new Light( sun_dir.x, sun_dir.y, sun_dir.z, 1.0, 0.95, 0.85, 0 );
+            //let light1 = new Light( -9, -9, 0.0, 1.0, 0.2, 0.2, 1 );
+            //light1.x = 1;
+            //console.log("light " + light1.x);
+
+            //mesh = Mesh.box(gl, shader_program, 1, 1, 1, [ "./textures/block/dirt.png", "./textures/block/grass_block_side.png", "./textures/block/grass_block_top.png" ], [ 1, 1, 1, 1, 0, 2 ]);
+            //mesh.load_texture("./metal_scale.png")
+            let obj_mesh = NormalMesh.box(gl,lit_program,1,1,1,cowtex);//mesh;    //just use the cube in mesh_template.js
+
+            let mesh =
+                NormalMesh.uv_sphere( gl, lit_program, 1, 16, scale ); 
+                // NormalMesh.box( gl, lit_program, 1, 1, 1, metal );
+            let earthmesh = 
+                NormalMesh.uv_sphere(gl, lit_program, 1,16, grass);
+            let moonmesh = NormalMesh.box(gl,lit_program,0.1,0.1,0.1,metal); 
+                //NormalMesh.box(gl, lit_program, 1,1,1, cowtex);
+
+            const mapSize = 3;
+            const minHeight = 0;
+            const maxHeight = 1;
+            const centerRow = Math.floor(mapSize / 2);
+            const centerCol = Math.floor(mapSize / 2);
+            const ascale = 3;
+            let myscale = Math.pow(2,ascale)+1
+            var value = null; // by default
+            var heightMapA = [...Array(myscale)].map(e => Array(myscale).fill(1));   
+            var heightMapB = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+            var heightMapC = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+            var heightMapD = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+            var heightMapE = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+
+            var heightMapF = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+            var heightMapG = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+            var heightMapH = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+            var heightMapI = [...Array(myscale)].map(e => Array(myscale).fill(value)); 
+
+         
+            //console.log(heightMap);
+
+
+            diamondSquareA(heightMapA, myscale, .0, minHeight, maxHeight, centerRow, centerCol);
+
+
+            diamondSquareB(heightMapB, myscale, .4, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapC, myscale, .3, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapD, myscale, .2, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapE, myscale, .4, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapF, myscale, .5, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapG, myscale, .4, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapH, myscale, .3, minHeight, maxHeight, centerRow, centerCol);
+            diamondSquareB(heightMapI, myscale, .4, minHeight, maxHeight, centerRow, centerCol);
+
+            //stitch the right, left, bottom, and top heightmaps together to the center one
+            for(let row = 0; row < myscale; row++){
+                for(let col = 0; col < myscale; col++){
+                heightMapB[row][0] = 1;             //right
+                heightMapC[row][myscale-1] = 1;     //left
+                heightMapD[myscale-1][col] = 1;      //bottom   
+                heightMapE[0][col] = 1;                 //top
+
+                }
+            }   
+            
+            //stitch the corner heightmaps together
+            for (let row = 0; row < myscale; row++) {
+                for(let col = 0; col < myscale; col++){
+                    heightMapF[row][0] = heightMapE[row][myscale-1];
+                    heightMapF[0][col] = heightMapB[myscale-1][col];
+
+                    heightMapG[row][myscale-1] = heightMapE[row][0];
+                    heightMapG[0][col] = heightMapC[myscale-1][col];
+
+                    heightMapH[myscale-1][col] = heightMapB[0][col];
+                    heightMapH[row][0] = heightMapD[row][myscale-1];
+
+                    heightMapI[row][myscale-1] = heightMapD[row][0];
+                    heightMapI[myscale-1][col] = heightMapC[0][col];
+                }
+            }
+
+            let polemesh = NormalMesh.box(gl, lit_program, 0.2, 2, 0.2, metal);
+            let watermesh = 
+                NormalMesh.platform( gl, lit_program, 64, 64, 0, 1, water_tex );
+
+            let testmesh = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapA, 0, 10, grass )
+            let testmesh2 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapB, 0, 10, grass )
+            let testmesh3 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapC, 0, 10, grass )
+                let testmesh4 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapD, 0, 10, grass )
+                let testmesh5 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapE, 0, 10, grass )
+                let testmesh6 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapF, 0, 10, grass )
+                let testmesh7 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapG, 0, 10, grass )
+                let testmesh8 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapH, 0, 10, grass )
+                let testmesh9 = 
+                NormalMesh.from_heightmap( gl, lit_program, heightMapI, 0, 10, grass )
+
+            let cowbody_mesh = NormalMesh.cow_body_box(gl,lit_program,1,2,1,cowtex);
+            let cowbody_leg_mesh = NormalMesh.cow_leg_box(gl,lit_program,0.25,1,0.25,cowtex); 
+            let cowhead_mesh = NormalMesh.cow_head_box(gl,lit_program,0.75,0.5,0.75,cowtex);
+            let root = new Node();
+
+            let hp = root.add_child();
+            hp.data = testmesh;
+            hp.position = new Vec4(0,0,0);
+
+            let hpB = root.add_child();
+            hpB.data = testmesh2;
+            hpB.position = new Vec4(myscale-1,0,0);
+
+            let hpC = root.add_child();
+            hpC.data = testmesh3;
+            hpC.position = new Vec4(-myscale+1,0,0);
+
+            let hpD = root.add_child();
+            hpD.data = testmesh4;
+            hpD.position = new Vec4(0,0,-myscale+1);
+
+            let hpE = root.add_child();
+            hpE.data = testmesh5;
+            hpE.position = new Vec4(0,0,myscale-1);
+
+            let hpF = root.add_child();
+            hpF.data = testmesh6;
+            hpF.position = new Vec4(myscale-1,0,myscale-1);
+
+            let hpG = root.add_child();
+            hpG.data = testmesh7;
+            hpG.position = new Vec4(-myscale+1,0,myscale-1);
+
+            let hpH = root.add_child();
+            hpH.data = testmesh8;
+            hpH.position = new Vec4(myscale-1,0,-myscale+1);
+
+            let hpI = root.add_child();
+            hpI.data = testmesh9;
+            hpI.position = new Vec4(-myscale+1,0,-myscale+1);
+
+            let water = hp.add_child();
+            water.data = watermesh;
+            water.position = new Vec4(0,0.5,0);
+
+            let pole1 = hp.add_child();
+            pole1.data = polemesh;
+            pole1.position = new Vec4(3,1,3);
+
+            let pole2 = hp.add_child();
+            pole2.data = polemesh;
+            pole2.position = new Vec4(3,1,-4);
+
+            let ball12 = pole1.add_child();
+            ball12.data = moonmesh;
+            ball12.position = new Vec4(0,1,0);
+
+            let light1 = ball12.add_child();
+            light1.data = new Light (0,0,0,0,0,1,1);
+            // light1.x = ball12.position.x;
+
+            let pole3 = hp.add_child();
+            pole3.data = polemesh;
+            pole3.position = new Vec4(-4,1,3);
+
+            let pole4 = hp.add_child();
+            pole4.data = polemesh;
+            pole4.position = new Vec4(-4,1,-4);
+
+            let ball34 = pole4.add_child();
+            ball34.data = moonmesh;
+            ball34.position = new Vec4(0,1,0);
+
+
+            let light2 = root.add_child();
+            light2.data = new Light (0,0,0,1,0,0,2);
+
+
+            let cowbody = root.add_child();
+            cowbody.data = cowbody_mesh;
+            cowbody.position = new Vec4(0.0,1.4,0.0);
+
+            let cowleg_fr = cowbody.add_child();
+            cowleg_fr.data = cowbody_leg_mesh;
+            cowleg_fr.position = new Vec4(0.38,0.88,1.0);
+
+            let cowleg_fl = cowbody.add_child();
+            cowleg_fl.data = cowbody_leg_mesh;
+            cowleg_fl.position = new Vec4(-0.38,0.88,1.0);
+
+            let cowleg_br = cowbody.add_child();
+            cowleg_br.data = cowbody_leg_mesh;
+            cowleg_br.position = new Vec4(0.38,-0.88,1);
+
+            let cowleg_bl = cowbody.add_child();
+            cowleg_bl.data = cowbody_leg_mesh;
+            cowleg_bl.position = new Vec4(-0.38,-0.88,1);
+
+
+            let cowhead = cowbody.add_child();
+            cowhead.data = cowhead_mesh;
+            cowhead.position = new Vec4( 0.0,1,-0.5);
+
+            
+            cowbody.scale = new Vec4(0.25,0.25,0.25,1);
+
+            cowleg_fr.pitch += 0.25;
+            cowleg_fl.pitch += 0.25;
+            cowleg_br.pitch += 0.25;
+            cowleg_bl.pitch += 0.25;
+
+            cowbody.pitch += 0.75;
+
+            let projection = Mat4.perspective_fovx( 0.125, 4 / 3, 0.125, 1024 );
+            let current_program = lit_program;
+
+            
+            //console.log(earth.data);
+
+
+            function generate_render_jobs(parent_matrix,node,lights,jobs){
+                let matrix = parent_matrix.mul(node.get_matrix());
+               if(node.data instanceof Light){
+                    lights.push(new RenderLight(matrix.get_transformed_coordinates(),node.data));
+               }
+               else if(node.data instanceof NormalMesh){
+                    jobs.push(new RenderMesh(matrix,node.data));
+               }
+               for(let child of node.children){
+                    generate_render_jobs(matrix,child,lights,jobs);
+                }
+            }
+            //let tileCoordinates = getTileCoordinates(heightMap, ascale);
+
+            //console.log(tileCoordinates);
+
+
+            const ROTATION_SPEED1 = 0.125; // eighth turn per second
+            let rotation_amnt = 0.0;
+            let rotation_amntXZ = 0;
+            let increasingPitch = true; // Flag to track the direction of pitch change
+            let walkforward = true;
+            let walk = true;
+            let turn = true;
+            let ball1 = true;
+            let ballspeed = 0.01;
+            let cowspeed = 0.003;
+            function render( now ) {
+                let time_delta = ( now - last_update ) / 1000;    
+
+                last_update = now;
+                rotation_amntXZ += ROTATION_SPEED1 * (performance.now() - last_update) / 1000;
+                requestAnimationFrame( render );
+                gl.clear( gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+
+
+
+                //use front right leg for checking
+                //legs are tied together diagonally when moving, if front right moves forward, so does back left, meanwhile front left and back right move backwards
+                //once fr leg hits the right pitch, start swinging back other direction
+                if (increasingPitch) {
+                    cowleg_fr.pitch += cowspeed;
+                    cowleg_fl.pitch -= cowspeed;
+                    cowleg_br.pitch -= cowspeed;
+                    cowleg_bl.pitch += cowspeed;
+                    if (cowleg_fr.pitch >= 0.3) {
+                        increasingPitch = false;
+                    }
+                } else {
+                    cowleg_fr.pitch -= cowspeed;
+                    cowleg_fl.pitch += cowspeed;
+                    cowleg_br.pitch += cowspeed;
+                    cowleg_bl.pitch -= cowspeed;
+
+                    if (cowleg_fr.pitch <= 0.2) {
+                        increasingPitch = true;
+                    }
+                }
+                //the cow walks back and forth
+                //when reaching the z value, stop moving, spin around, and move forward
+                if(walkforward){
+                    if(walk){
+                        cowbody.position.z += cowspeed;
+                    }
+                     if(cowbody.position.z >= 1){
+                        walk = false;
+                        cowbody.yaw += cowspeed;
+                        //console.log(cowbody.yaw);
+                        if(cowbody.yaw >= 0.5){
+                            walkforward = false;
+                            walk = true;
+                            cowbody.yaw = 0.5;
+                        }
+                    }
+                }
+                else {
+                    if(walk){
+                        cowbody.position.z -= cowspeed;
+                    }
+                    if(cowbody.position.z <= -1){
+                        walk = false;
+                        cowbody.yaw += cowspeed;
+                        if(cowbody.yaw >= 1.0){
+                            walkforward = true;
+                            walk = true;
+                            cowbody.yaw = 0.0;
+                        }
+                    }
+                }
+
+                //move the balls back and forth, the lights are attached to these
+                if(ball1){
+                    ball12.position.z -= ballspeed;
+                    ball34.position.z += ballspeed;
+                    if(ball12.position.z <= -7){
+                        ball1 = false;
+                    }
+                }
+                else{
+                    ball12.position.z += ballspeed;
+                    ball34.position.z -= ballspeed;
+                    if(ball12.position.z >= 0){
+                        ball1 = true;
+                    }
+                }
+
+                let jobs = [];
+                let lights = [];
+                generate_render_jobs(new Mat4,root,lights,jobs);
+
+                for(let job of jobs){
+                    //console.log(job.matrix);
+                    let mesh2 = job.mesh;
+                    //console.log(mesh2);
+                    let model = job.matrix;
+                    //console.log(job.light);
+                    let view = cam.get_view_matrix();//.inverse();
+                    let modelview = view.mul(model);
+                    set_uniform_matrix4( gl, current_program, 'projection', projection.data );
+                    set_uniform_matrix4( gl, current_program, 'modelview', modelview.data );
+                    set_uniform_matrix4( gl, current_program, 'model', model.data );
+                    set_uniform_matrix4( gl, current_program, 'view', view.data );
+
+                    // transform viewer coordinates
+                    // let viewer_loc = cam.get_transformed_coordinates();
+                    set_uniform_vec3( gl, current_program, 'viewer_loc', cam.x, cam.y, cam.z );
+                    //console.log("x" + cam.x + " y" + cam.y + " z " + cam.z);
+
+
+                    //console.log(cam);
+                    //console.log("Cam " + cam.x + " " + cam.y + " " + cam.z);
+                    sun.bind( gl, current_program, modelview );
+
+                    for(let light of lights){
+                        if(light.light != null){
+                            //console.log("LIGHT");
+                            //console.log(light.light.b);
+                            if(light.light.b == 1){ //blue light
+                                light.light.z = ball12.position.z + 3;
+                                light.light.x = 3;
+                                light.light.y = 0.0;
+                                light.light.bind( gl, current_program, modelview );
+                            }
+                            else if(light.light.r == 1){    //red light
+                                light.light.z = ball34.position.z - 4;
+                                light.light.x = -4;
+                                light.light.y = 0.0;
+                                light.light.bind(gl,current_program,modelview);
+                            }
+                        }
+                    }
+
+                    if(job.mesh != null){
+                        job.mesh.render(gl)
+                    }
+
+                }
+
+            }
+
+            const KEYMAP = {
+                'KeyW': function() { cam.move_in_direction( 0, 0, FLY_SPEED_PER_FRAME ); },
+                'KeyS': function() { cam.move_in_direction( 0, 0, -FLY_SPEED_PER_FRAME ); },
+                'KeyA': function() { cam.move_in_direction( -FLY_SPEED_PER_FRAME, 0, 0 ); },
+                'KeyD': function() { cam.move_in_direction( FLY_SPEED_PER_FRAME, 0, 0 ); },
+                'Space': function() { cam.translate( 0, FLY_SPEED_PER_FRAME, 0 ); },
+                'KeyC': function() { cam.translate( 0, -FLY_SPEED_PER_FRAME, 0 ); },
+                'KeyQ': function() { cam.add_roll( -ROTATION_SPEED_PER_FRAME ); },
+                'KeyE': function() { cam.add_roll( ROTATION_SPEED_PER_FRAME ); },
+                'ArrowLeft': function() { cam.add_yaw( -ROTATION_SPEED_PER_FRAME ); },
+                'ArrowRight': function() { cam.add_yaw( ROTATION_SPEED_PER_FRAME ); },
+                'ArrowUp': function() { cam.add_pitch( -ROTATION_SPEED_PER_FRAME ); },
+                'ArrowDown': function() { cam.add_pitch( ROTATION_SPEED_PER_FRAME ); },
+            };
+
+            function update() {
+                let keys_down = keys.keys_down_list();
+
+                for( const key of keys_down ) {
+                   let bound_function = KEYMAP[ key ];
+
+                   if( bound_function ) {
+                       bound_function();
+                   }
+                }
+
+                return;
+            }
+            
+            requestAnimationFrame( render );
+            setInterval( update, DESIRED_MSPT );
+        </script>
+    </body>
+</html>
